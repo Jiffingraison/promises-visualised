@@ -4,7 +4,7 @@ from src.instructions import (
     Instruction, Read, Write, If, Loop,
     AccessMode, Condition
 )
-from src.state import Thread, Memory, Message, Machine
+from src.state import Thread, Memory, Message, Machine, Promise
 
 
 # Choice Classes 
@@ -39,8 +39,7 @@ class ExecutionEngine:
         """Get threads that still have instructions."""
         return self.machine.get_active_threads()
 
-    # ─── Execute: Read ───────────────────────────────────────────────────
-
+    #Execute: Read
     def execute_read(self, thread: Thread, instr: Read,
                      chosen_message: Message):
         
@@ -61,12 +60,24 @@ class ExecutionEngine:
         thread.pop_instruction()
         self.step_count += 1
 
-    # ─── Execute: Write ──────────────────────────────────────────────────
+    #Execute: Write
 
     def execute_write(self, thread: Thread, instr: Write,
                       timestamp: Optional[int] = None):
         # Resolve value
         value = instr.resolve_value(thread.registers)
+
+        # Check: does this write fulfill a pending promise?
+        promise = self.machine.find_matching_promise(
+            thread.thread_id, instr.location, value)
+
+        if promise:
+            # Fulfillment  message already exists in memory from when promise was made
+            promise.fulfilled = True
+            thread.update_view_front(instr.location, promise.timestamp)
+            thread.pop_instruction()
+            self.step_count += 1
+            return
 
         # Determine timestamp
         if timestamp is None:
@@ -125,6 +136,104 @@ class ExecutionEngine:
         # If false: loop is discarded, program continues with whatever follows
 
         self.step_count += 1
+
+    #Promise Creation
+
+    def create_promise(self, thread: Thread, location: str, value: int) -> bool:
+        
+        # Run certification first
+        if not self.certify_promise(thread, location, value):
+            return False
+
+        # Certification passed — create the message and add to memory
+        timestamp = self.machine.memory.next_timestamp(location)
+        msg = Message(value=value, timestamp=timestamp, view_from={})
+        self.machine.memory.add_message(location, msg)
+
+        # Record the promise as pending
+        promise = Promise(
+            thread_id=thread.thread_id,
+            location=location,
+            value=value,
+            timestamp=timestamp
+        )
+        self.machine.promises.append(promise)
+
+        return True
+
+    #Certification
+
+    def certify_promise(self, thread: Thread, location: str, value: int) -> bool:
+        """
+        Certification check: can the thread reach a write to 'location' with 'value'
+        by executing alone 
+        """
+        # Deep copy so certification doesn't affect real state
+        sim_machine = copy.deepcopy(self.machine)
+        sim_thread = sim_machine.get_thread(thread.thread_id)
+
+        # Safety limit to prevent infinite loops during certification
+        max_steps = 100
+
+        for _ in range(max_steps):
+            if sim_thread.is_finished:
+                return False  # Thread finished without reaching the write
+
+            instr = sim_thread.next_instruction
+
+            if isinstance(instr, Write):
+                # Check: is this the write we're looking for?
+                try:
+                    v = instr.resolve_value(sim_thread.registers)
+                except RuntimeError:
+                    return False  # Can't resolve value — register not set
+                if instr.location == location and v == value:
+                    return True  # Thread can reach this write — CERTIFIED
+
+                # Not the right write — execute it normally in simulation
+                ts = sim_machine.memory.next_timestamp(instr.location)
+                msg = Message(value=v, timestamp=ts, view_from={})
+                sim_machine.memory.add_message(instr.location, msg)
+                sim_thread.update_view_front(instr.location, ts)
+                sim_thread.pop_instruction()
+
+            elif isinstance(instr, Read):
+                # Auto-pick the first available message
+                min_ts = sim_thread.get_view_front(instr.location)
+                available = sim_machine.memory.get_readable_messages(
+                    instr.location, min_ts)
+                if not available:
+                    return False  # Thread stuck — no messages to read
+                msg = available[0]
+                sim_thread.registers[instr.target] = msg.value
+                sim_thread.update_view_front(instr.location, msg.timestamp)
+                sim_thread.pop_instruction()
+
+            elif isinstance(instr, If):
+                sim_thread.pop_instruction()
+                try:
+                    result = instr.condition.evaluate(sim_thread.registers)
+                except RuntimeError:
+                    return False  # Register not set — can't evaluate
+                if result:
+                    sim_thread.prepend_instructions(list(instr.true_branch))
+                else:
+                    sim_thread.prepend_instructions(list(instr.false_branch))
+
+            elif isinstance(instr, Loop):
+                sim_thread.pop_instruction()
+                try:
+                    result = instr.condition.evaluate(sim_thread.registers)
+                except RuntimeError:
+                    return False  # Register not set — can't evaluate
+                if result:
+                    unrolled = list(instr.body) + [Loop(instr.condition, list(instr.body))]
+                    sim_thread.prepend_instructions(unrolled)
+
+            else:
+                return False  # Unknown instruction type
+
+        return False  # Hit step limit — assume can't reach    
 
     # Finding Available Messages 
 

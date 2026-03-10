@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from src.instructions import Instruction
 
 
+
 #Message
 
 @dataclass
@@ -18,6 +19,24 @@ class Message:
 
     def __repr__(self):
         return f"MSG(val={self.value}, ts={self.timestamp})"
+
+#Promise
+
+@dataclass
+class Promise:
+    """
+    A record of a speculative future write
+    Certification ensures the thread can actually reach the write by running alone.
+    """
+    thread_id: int      # which thread made this promise
+    location: str       # memory location (e.g., "x")
+    value: int          # promised value (e.g., 1)
+    timestamp: int      # where in the message list this was placed
+    fulfilled: bool = False  # has the thread executed the matching write yet?
+
+    def __repr__(self):
+        status = "fulfilled" if self.fulfilled else "pending"
+        return f"Promise(T{self.thread_id}: {self.location}={self.value}, ts={self.timestamp}, {status})"
 
 
 #Memory
@@ -151,13 +170,12 @@ class Machine:
     """
     The top-level machine containing threads and shared memory.
     MACHINE = { THREAD OBJECTS + MEMORY }
-    The machine coordinates execution: the user selects which thread to run,
-    and the machine executes that thread's next instruction.
     """
 
     def __init__(self, threads: List[Thread]):
         self.threads = threads
         self.memory = Memory()
+        self.promises: List[Promise] = []  # Outstanding promises
         self._history: List = []  # For potential backtracking
 
     @property
@@ -175,6 +193,18 @@ class Machine:
             if t.thread_id == thread_id:
                 return t
         raise ValueError(f"No thread with ID {thread_id}")
+    
+    def get_promises_for_thread(self, thread_id: int) -> List[Promise]:
+        """Get all unfulfilled promises made by a specific thread."""
+        return [p for p in self.promises if p.thread_id == thread_id and not p.fulfilled]
+
+    def find_matching_promise(self, thread_id: int, location: str, value: int):
+        """Check if a thread has an unfulfilled promise matching this write."""
+        for p in self.promises:
+            if (p.thread_id == thread_id and p.location == location
+                    and p.value == value and not p.fulfilled):
+                return p
+        return None
 
     def initialize_memory_for_threads(self):
         """
