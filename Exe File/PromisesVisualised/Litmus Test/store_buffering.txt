@@ -1,0 +1,9 @@
+#Store Buffering (SB)
+
+Thread 1:
+    x = 1
+    r1 = y
+
+Thread 2:
+    y = 1
+    r2 = x

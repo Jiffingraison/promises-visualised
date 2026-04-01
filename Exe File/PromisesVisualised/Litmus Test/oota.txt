@@ -1,0 +1,13 @@
+#Out-of-Thin-Air (OOTA) Example
+
+Thread 1:
+    r1 = y
+    if (r1 == 1):
+        x = 1
+    end
+
+Thread 2:
+    r2 = x
+    if (r2 == 1):
+        y = 1
+    end

@@ -1,0 +1,9 @@
+#Message Passing (MP)
+
+Thread 1:
+    x = 1
+    y.rel = 1
+
+Thread 2:
+    r1 = y.acq
+    r2 = x
